@@ -59,37 +59,7 @@ static int send_empty_multicast(MessageType type) {
   return send_multicast(&self, &msg);
 }
 
-static int cs_queue_cmp(size_t i, size_t j) {
-  if (self.cs_queue[i].request_ts < self.cs_queue[j].request_ts)
-    return -1;
-  if (self.cs_queue[i].request_ts > self.cs_queue[j].request_ts)
-    return 1;
-  if (self.cs_queue[i].id < self.cs_queue[j].id)
-    return -1;
-  if (self.cs_queue[i].id > self.cs_queue[j].id)
-    return 1;
-  return 0;
-}
-
-static void cs_queue_push(struct QueueEntry entry) {
-  self.cs_queue[self.cs_queue_len] = entry;
-  for (size_t i = self.cs_queue_len; i > 0 && cs_queue_cmp(i, i - 1) < 0; --i) {
-    struct QueueEntry buf1 = self.cs_queue[i - 0];
-    struct QueueEntry buf2 = self.cs_queue[i - 1];
-    self.cs_queue[i - 0] = buf2;
-    self.cs_queue[i - 1] = buf1;
-  }
-  ++self.cs_queue_len;
-}
-
-static void cs_queue_pop() {
-  for (size_t i = 0; i + 1 < self.cs_queue_len; ++i)
-    self.cs_queue[i] = self.cs_queue[i + 1];
-  --self.cs_queue_len;
-}
-
 static int process_last_message(size_t from) {
-  struct QueueEntry entry;
   switch (msg.s_header.s_type) {
   case STARTED:
     self.process_info[from].status = 1;
@@ -100,17 +70,17 @@ static int process_last_message(size_t from) {
     break;
 
   case CS_REQUEST:
-    entry.id = from;
-    entry.request_ts = msg.s_header.s_local_time;
-    cs_queue_push(entry);
-    CHK_RETCODE(send_empty(from, CS_REPLY));
+    if (!~self.request_ts || msg.s_header.s_local_time < self.request_ts ||
+        (msg.s_header.s_local_time == self.request_ts && from < self.id)) {
+      CHK_RETCODE(send_empty(from, CS_REPLY));
+    } else {
+      self.process_info[from].allowing_cs = 1;
+      self.process_info[from].waiting_for_self = 1;
+    }
     break;
 
   case CS_REPLY:
-    break;
-
-  case CS_RELEASE:
-    cs_queue_pop();
+    self.process_info[from].allowing_cs = 1;
     break;
   }
   return 0;
@@ -150,35 +120,24 @@ static int sync_started_done(MessageType type) {
 int request_cs(const void *self_) {
   (void)self_;
   CHK_RETCODE(send_empty_multicast(CS_REQUEST));
-  timestamp_t request_ts = msg.s_header.s_local_time;
 
-  struct QueueEntry entry;
-  entry.id = self.id;
-  entry.request_ts = request_ts;
-  cs_queue_push(entry);
+  self.request_ts = msg.s_header.s_local_time;
 
-  int not_all_responded = 1;
-  while (not_all_responded) {
-    not_all_responded = 0;
+  for (size_t i = 0; i < self.n_processes; ++i)
+    self.process_info[i].allowing_cs = 0;
+
+  int all_allowing = 0;
+  while (!all_allowing) {
+    all_allowing = 1;
     for (size_t i = 0; i < self.n_processes; ++i) {
       if (i == self.id)
         continue;
-      if (self.process_info[i].status == PS_DONE)
-        continue;
-      if (self.process_info[i].last_ts < request_ts)
-        not_all_responded = 1;
       int retcode = receive(&self, i, &msg);
       CHK_RETCODE(retcode);
-      if (retcode) {
+      if (retcode)
         process_last_message(i);
-      }
-    }
-  }
-
-  while (self.cs_queue[0].id != self.id) {
-    size_t from = self.cs_queue[0].id;
-    if (from != self.id) {
-      CHK_RETCODE(wait_for_message(from));
+      all_allowing = all_allowing && (self.process_info[i].status == PS_DONE ||
+                                      self.process_info[i].allowing_cs);
     }
   }
 
@@ -187,8 +146,12 @@ int request_cs(const void *self_) {
 
 int release_cs(const void *self_) {
   (void)self_;
-  CHK_RETCODE(send_empty_multicast(CS_RELEASE));
-  cs_queue_pop();
+  for (size_t i = 0; i < self.n_processes; ++i) {
+    if (i != self.id && self.process_info[i].waiting_for_self) {
+      CHK_RETCODE(send_empty(i, CS_REPLY));
+    }
+  }
+  self.request_ts = -1;
   return 0;
 }
 
@@ -277,9 +240,7 @@ int main(int argc, char *argv[]) {
   self.pipes_log = fopen(pipes_log, "w");
   self.events_log = fopen(events_log, "a");
   self.local_time = 0;
-
-  self.cs_queue = malloc(sizeof(struct QueueEntry) * self.n_processes);
-  self.cs_queue_len = 0;
+  self.request_ts = -1;
 
   self.process_info = malloc(sizeof(struct ProcessInfo) * self.n_processes);
   memset(self.process_info, 0, sizeof(struct ProcessInfo) * self.n_processes);

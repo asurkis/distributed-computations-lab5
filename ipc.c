@@ -64,7 +64,6 @@ int receive(void *self_, local_id from, Message *msg) {
   }
 
   timestamp_t ts = msg->s_header.s_local_time;
-  self->process_info[from].last_ts = ts;
   if (self->local_time < ts)
     self->local_time = ts;
   ++self->local_time;

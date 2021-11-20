@@ -51,20 +51,12 @@
     }                                                                          \
   } while (0)
 
-enum ProcessStatus {
-  PS_INIT = 0,
-  PS_STARTED,
-  PS_DONE
-};
-
-struct QueueEntry {
-  size_t id;
-  timestamp_t request_ts;
-};
+enum ProcessStatus { PS_INIT = 0, PS_STARTED, PS_DONE };
 
 struct ProcessInfo {
-  timestamp_t last_ts;
   enum ProcessStatus status;
+  char allowing_cs;
+  char waiting_for_self;
 };
 
 struct Self {
@@ -72,15 +64,14 @@ struct Self {
   FILE *events_log;
   FILE *pipes_log;
 
-  struct QueueEntry *cs_queue;
   struct ProcessInfo *process_info;
-  size_t cs_queue_len;
 
   size_t id;
   size_t n_processes;
 
   timestamp_t local_time;
-  int use_mutex;
+  timestamp_t request_ts;
+  char use_mutex;
 };
 
 #endif
